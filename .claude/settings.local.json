@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(Get-Command claude -ErrorAction SilentlyContinue)",
+      "Bash(npm install *)",
+      "Bash(npx tsc *)",
+      "Bash(findstr -i \"md\")",
+      "Bash(gh auth *)",
+      "Bash(git config *)",
+      "PowerShell(Get-Command *)",
+      "Bash(git init *)",
+      "Bash(git add *)",
+      "Bash(git commit -q -m ' *)"
+    ]
+  }
+}
