@@ -17,7 +17,7 @@ export const CONFIG = {
     // toward this via decay, eject, rage, etc. but never below it.
     minMass: 10,
     baseSpeed: 600,
-    decayRate: 0.00, // 0.002
+    decayRate: 0.002, // 0.002
     // a cell must have at least this many times the other's mass to eat it
     eatRatio: 1.25,
     maxCells: 16,
@@ -47,7 +47,7 @@ export const CONFIG = {
   },
 
   mother: {
-    count: 20,
+    count: 5,
     mass: 300,
     // cells with mass >= popThreshold × (effectiveMass / mass) pop on the mother
     // (virus-style), obtaining its FULL effective mass (300 + consumedMass). this
@@ -69,7 +69,7 @@ export const CONFIG = {
     // …and each extra pellet drains this much from consumedMass, so the mother's
     // size & spawn rate ramp back to normal as the pool empties. (=1 → 1:1 with
     // each mass-1 pellet; >1 drains faster but discards mass.)
-    foodMassCost: 3,
+    foodMassCost: 1,
     // mother food is MINTED (added to the world), never recycled from the 5000-pellet
     // field pool — so mothers never drain the rest of the map. Minted food is
     // transient (removed when eaten). PER-MOTHER cap on live minted food, so every
@@ -78,7 +78,7 @@ export const CONFIG = {
     // food converted from consumedMass (player cells the mother ate) IGNORES this cap
     // and is minted until consumedMass hits 0. No mother food is ever expired/removed
     // except by being eaten — so heavy player-grinding can grow the field's food.
-    maxSpawnedFood: 250,
+    maxSpawnedFood: 200,
     // base launch speed (px/sec), scaled up with the mother's radius so food still
     // clears the body when the mother is engorged. Friction then settles it nearby.
     foodInitialVelocity: 500,

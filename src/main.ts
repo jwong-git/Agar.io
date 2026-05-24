@@ -110,7 +110,10 @@ function startGame(): void {
     return;
   }
 
-  net = new Network(`ws://${location.hostname}:${CONFIG.port}`, name, color);
+  // connect to the same origin the page was served from: wss:// on https pages, ws://
+  // otherwise. In dev (Vite on :5173) the /ws path is proxied to the game server.
+  const wsProto = location.protocol === "https:" ? "wss" : "ws";
+  net = new Network(`${wsProto}://${location.host}/ws`, name, color);
   mouse = new MouseInput(canvas);
 
   net.onDead = (killedBy) => {

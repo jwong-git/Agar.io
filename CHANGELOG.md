@@ -6,7 +6,35 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ---
 
-## v0.5.18 — 2026-05-21 (HUD Update)
+## v0.5.20 — 2026-05-22 (Fly.io deployment)
+
+### Added
+- **`Dockerfile`** — single-stage Alpine Node 22 image that runs `npm ci`, `npm run build`, then `npm start`. Reads `PORT` from the env so Fly.io can pick the port.
+- **`.dockerignore`** — excludes `node_modules/`, `dist/`, `.git/`, `*.md`, etc. from the build context for a smaller, safer image.
+- **`DEPLOY.md`** rewritten as a focused Fly.io guide (install `flyctl` → `fly launch` → `fly deploy`, with `fly.toml` recommendations and cost expectations).
+
+### Removed
+- Previous `DEPLOY.md` (port-forward + DuckDNS walkthrough) — that route is no longer the deployment target. Single-origin server code remains in place (host-agnostic and required by Fly.io anyway).
+
+### Changed
+- **Game title renamed** from "Agar Clone" to **"Agar.io Retro"** — both the browser tab `<title>` and the `<h1>` on the start/death overlay.
+
+---
+
+## v0.5.19 — 2026-05-21 (Single-origin deploy)
+
+### Changed
+- **The game server now serves the built client *and* the WebSocket on one port.** Previously the client (Vite, :5173) and the ws server (:8080) were separate origins, which can't be exposed through a single tunnel/host and breaks `wss` on an `https` page. `server/index.ts` now wraps the ws server in a Node `http.createServer`: static requests are served from `dist/` via `sirv` (SPA fallback), and only `Upgrade` requests to `/ws` are handed to the `WebSocketServer` (`noServer` + manual `handleUpgrade`). Listens on `process.env.PORT || CONFIG.port` for PaaS portability.
+- **Client connects to its own origin.** `src/main.ts` now derives the socket URL as `` `${wss|ws}://${location.host}/ws` `` instead of the hardcoded `ws://host:8080`, so it works behind TLS/tunnels automatically.
+- **Vite dev proxy** forwards `/ws` → `ws://localhost:CONFIG.port` (`vite.config.ts`), so the dev flow (`npm run dev`) uses the identical single-origin connection path as production.
+
+### Added
+- **`npm start`** script (`tsx server/index.ts`) — runs the production server serving `dist/` + `/ws`.
+- **`sirv`** dependency for static file serving.
+- `.claude/settings.local.json` added to `.gitignore` (machine-local, no longer tracked).
+
+### Notes
+- Build + run for a public deploy: `npm run build` → `npm start` → expose port `8080` (e.g. `cloudflared tunnel --url http://localhost:8080`). The printed `https` URL serves both client and `wss`.
 
 ### Added
 - **"Leaderboard" title** above the leaderboard list (uppercase header with a divider).

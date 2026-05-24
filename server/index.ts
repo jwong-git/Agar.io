@@ -1,5 +1,7 @@
 import { WebSocketServer, WebSocket } from "ws";
+import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
+import sirv from "sirv";
 import { CONFIG } from "../shared/config";
 import { radiusOf, speedOf, aoiHalfExtent } from "../shared/math";
 import { SpatialGrid } from "./spatial-grid";
@@ -307,8 +309,33 @@ function spawnPlayerCells(player: ServerPlayer): void {
   player.magnetUntil = 0;
 }
 
-const wss = new WebSocketServer({ port: CONFIG.port });
-console.log(`[server] listening on ws://localhost:${CONFIG.port}`);
+// One HTTP server serves BOTH the built client (static files from dist/) and the
+// WebSocket, on a single port — so a single tunnel/host exposes everything and `wss`
+// works on the same origin. Static requests are served by sirv; only Upgrade requests
+// to the /ws path are handed to the WebSocket server. In dev, Vite serves the client
+// on :5173 and proxies /ws here (see vite.config.ts), so this path is identical.
+const PORT = Number(process.env.PORT) || CONFIG.port;
+const serveStatic = sirv("dist", { single: true });
+const httpServer = createServer((req, res) => {
+  serveStatic(req, res, () => {
+    res.statusCode = 404;
+    res.end("Not found");
+  });
+});
+
+const wss = new WebSocketServer({ noServer: true });
+httpServer.on("upgrade", (req, socket, head) => {
+  const pathname = new URL(req.url ?? "/", "http://localhost").pathname;
+  if (pathname === "/ws") {
+    wss.handleUpgrade(req, socket, head, (ws) => wss.emit("connection", ws));
+  } else {
+    socket.destroy();
+  }
+});
+
+httpServer.listen(PORT, () => {
+  console.log(`[server] listening on http://localhost:${PORT} (client + ws at /ws)`);
+});
 
 wss.on("connection", (socket) => {
   socket.on("message", (raw) => {
