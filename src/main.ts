@@ -66,7 +66,7 @@ function applyTheme(t: ThemeName): void {
   themeButton.textContent = t === "dark" ? "☀️ Light" : "🌙 Dark";
 }
 
-const RENDER_DELAY_MS = 100;
+const RENDER_DELAY_MS = 50;
 const FIT_MIN_ZOOM = 0.05;
 const DEATH_FADE_MS = 380;
 const VIEWPORT_MARGIN = 60;

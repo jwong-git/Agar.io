@@ -323,7 +323,11 @@ const httpServer = createServer((req, res) => {
   });
 });
 
-const wss = new WebSocketServer({ noServer: true });
+// permessage-deflate compresses each WebSocket frame on the wire. Snapshots are
+// JSON-heavy with lots of repeated keys/colors — typical compression ratios are
+// 3–5x, which on a slow uplink translates to lower latency (less to push down
+// the pipe). Modest CPU cost; well worth it for this game.
+const wss = new WebSocketServer({ noServer: true, perMessageDeflate: true });
 httpServer.on("upgrade", (req, socket, head) => {
   const pathname = new URL(req.url ?? "/", "http://localhost").pathname;
   if (pathname === "/ws") {

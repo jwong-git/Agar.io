@@ -17,7 +17,7 @@ An Agar.io clone built incrementally over multiple sessions. The user is a comfo
 - **Server is the only source of truth.** Clients send input + events; they render whatever the server sends. Never compute authoritative game state in `src/`.
 - **Wire format lives in `shared/protocol.ts`.** Both sides import these types. Add new fields here first.
 - **All tunable gameplay numbers live in `shared/config.ts`.** No magic numbers in physics or rendering code — refer to `CONFIG.*`.
-- **Tick rate is 30Hz**, render rate is 60Hz (rAF). Clients interpolate 100ms behind latest snapshot to hide network jitter.
+- **Tick rate is 60Hz**, render rate is 60Hz (rAF). Clients interpolate 50ms behind latest snapshot to hide network jitter (`RENDER_DELAY_MS` in `src/main.ts`).
 - **Per-viewer AOI**: server filters snapshots to each viewer's area. Don't send the whole world to everyone.
 
 ## Stack
@@ -36,7 +36,7 @@ shared/
   protocol.ts      # CellSnapshot, FoodSnapshot, BlobSnapshot, VirusSnapshot, MotherSnapshot, ClientMessage, ServerMessage
 
 server/
-  index.ts         # 30Hz tick: input → move → grid rebuild → repulse → eat → virus → merge → opponents → decay → snapshots
+  index.ts         # 60Hz tick: input → move → grid rebuild → repulse → eat → virus → merge → opponents → decay → snapshots
   spatial-grid.ts  # uniform-grid broad-phase: rebuild(), forEachInRange(x0,y0,x1,y1,fn)
 
 src/

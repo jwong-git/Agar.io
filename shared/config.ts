@@ -3,7 +3,7 @@
 export const CONFIG = {
   port: 8080,
   // TPS
-  tickRate: 30,
+  tickRate: 60,
 
   world: {
     width: 5000,
@@ -12,7 +12,7 @@ export const CONFIG = {
   },
 
   player: {
-    startMass: 10,
+    startMass: 1000,
     // hard floor for any cell's mass — independent of startMass. cells shrink
     // toward this via decay, eject, rage, etc. but never below it.
     minMass: 10,
@@ -81,7 +81,7 @@ export const CONFIG = {
     maxSpawnedFood: 200,
     // base launch speed (px/sec), scaled up with the mother's radius so food still
     // clears the body when the mother is engorged. Friction then settles it nearby.
-    foodInitialVelocity: 500,
+    foodInitialVelocity: 750,
     // each shot of food gets a random friction in [min, max]: lower = settles
     // closer, higher = drifts farther. Randomizing gives a more organic spread.
     foodFrictionMin: 0.85,

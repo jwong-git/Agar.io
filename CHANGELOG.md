@@ -6,7 +6,19 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ---
 
-## v0.5.20 — 2026-05-22 (Fly.io deployment)
+## v0.6.2 — 2026-05-22 (Latency quick-wins)
+
+### Changed
+- **Tick rate 30 → 60 Hz** (`shared/config.ts CONFIG.tickRate`). Halves the per-tick wait (≈33ms → ≈17ms) and doubles snapshot frequency. Server CPU and outbound bandwidth roughly double — fine for a Fly.io small machine and a handful of players. CLAUDE.md architecture invariant updated to match.
+- **Client interpolation buffer 100 → 50 ms** (`RENDER_DELAY_MS` in `src/main.ts`). Cuts ~50ms off perceived input lag. Trade-off: more visible motion jitter if a snapshot is late (mitigated by the higher tick rate; snapshots now arrive every ~17ms).
+- **WebSocket `permessage-deflate` enabled** (`server/index.ts`, `WebSocketServer({ perMessageDeflate: true })`). Snapshots are JSON-heavy with lots of repeated keys/colors; typical compression ratio is 3–5×, which translates to lower latency on slow uplinks (less to push). Modest CPU cost.
+
+### Notes
+- These are the "quick wins" before considering client-side prediction. Combined they should shave roughly **~65 ms** off perceived input lag and feel smoother on a modest connection. If lag still feels bad, the next step is client-side prediction of the local cells (movement only, no interaction prediction), which removes ~RTT from the feel of your own movement at the cost of meaningful code complexity.
+
+---
+
+## v0.6.1 — 2026-05-22 (Fly.io deployment)
 
 ### Added
 - **`Dockerfile`** — single-stage Alpine Node 22 image that runs `npm ci`, `npm run build`, then `npm start`. Reads `PORT` from the env so Fly.io can pick the port.
@@ -21,7 +33,7 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ---
 
-## v0.5.19 — 2026-05-21 (Single-origin deploy)
+## v0.6.0 — 2026-05-21 (Single-origin deploy)
 
 ### Changed
 - **The game server now serves the built client *and* the WebSocket on one port.** Previously the client (Vite, :5173) and the ws server (:8080) were separate origins, which can't be exposed through a single tunnel/host and breaks `wss` on an `https` page. `server/index.ts` now wraps the ws server in a Node `http.createServer`: static requests are served from `dist/` via `sirv` (SPA fallback), and only `Upgrade` requests to `/ws` are handed to the `WebSocketServer` (`noServer` + manual `handleUpgrade`). Listens on `process.env.PORT || CONFIG.port` for PaaS portability.
@@ -34,7 +46,11 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 - `.claude/settings.local.json` added to `.gitignore` (machine-local, no longer tracked).
 
 ### Notes
-- Build + run for a public deploy: `npm run build` → `npm start` → expose port `8080` (e.g. `cloudflared tunnel --url http://localhost:8080`). The printed `https` URL serves both client and `wss`.
+- Build + run for a public deploy: `npm run build` → `npm start` → expose port `8080`. The single-origin server serves both client and `wss` on the same port.
+
+---
+
+## v0.5.18 — 2026-05-21 (HUD Update)
 
 ### Added
 - **"Leaderboard" title** above the leaderboard list (uppercase header with a divider).
