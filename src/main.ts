@@ -1,5 +1,5 @@
 import { CONFIG } from "../shared/config";
-import { radiusOf, zoomOf } from "../shared/math";
+import { radiusOf, speedOf, zoomOf } from "../shared/math";
 import type { CellSnapshot, LeaderboardEntry } from "../shared/protocol";
 import { MouseInput } from "./input";
 import { Network, type Snapshot } from "./network";
@@ -25,6 +25,10 @@ const deathMessage = document.getElementById(
   "deathMessage",
 ) as HTMLParagraphElement;
 const buffsEl = document.getElementById("buffs") as HTMLDivElement;
+const disconnectBanner = document.getElementById(
+  "disconnectBanner",
+) as HTMLDivElement;
+const netStatEl = document.getElementById("netstat") as HTMLDivElement;
 
 function resize(): void {
   // Cap the drawing buffer at the configured max. CSS keeps the canvas at
@@ -77,6 +81,23 @@ let lastView: { x: number; y: number; zoom: number } | null = null;
 let lastInputSent = 0;
 let prevCells: CellSnapshot[] = [];
 const deathFades: DeathFade[] = [];
+
+// === client-side prediction (MVP) ===
+// We render our own cells using locally-predicted positions instead of the
+// server's interpolated past, so movement feels instant despite RTT + the
+// 50ms interpolation buffer. Movement-only — eating/splits/decay/repulsion
+// stay server-authoritative.
+const predictedSelf = new Map<string, { x: number; y: number }>();
+let lastPredictTime = 0;
+// snap predicted to server when divergence exceeds this (handles splits / pops / teleports
+// where local guess would be way off). 150px is roughly a split's launch travel.
+const PREDICT_SNAP_DIST_SQ = 150 * 150;
+// each frame we also pull predicted gently toward the server position. small factor so
+// motion doesn't drag back to the past, but enough to bleed off accumulated drift.
+const PREDICT_DRIFT_LERP = 0.05;
+// if no snapshot has arrived for this long, treat the server as unreachable: stop
+// predicting (so the cell freezes instead of drifting into nothing) and show a banner.
+const DISCONNECTED_MS = 2000;
 
 playButton.onclick = () => startGame();
 nameInput.addEventListener("keydown", (e) => {
@@ -191,7 +212,55 @@ function frame(): void {
   const renderTime = now - RENDER_DELAY_MS;
   const state = interpolate(net.snapshots, renderTime);
 
+  // Detect server disconnection: if the newest snapshot is older than
+  // DISCONNECTED_MS, no fresh state is coming. Show the banner and pause
+  // prediction so the local cell freezes (matches pre-MVP behavior) rather
+  // than wandering off into nowhere with no interactions possible.
+  const latestSnap =
+    net.snapshots.length > 0
+      ? net.snapshots[net.snapshots.length - 1]
+      : null;
+  const disconnected =
+    latestSnap !== null && now - latestSnap.receivedAt > DISCONNECTED_MS;
+  disconnectBanner.classList.toggle("show", disconnected);
+
+  // Live server-health readout. `tps` = the server's effective tick rate (drops
+  // when Fly throttles the CPU); `recvHz` = how fast THIS client receives
+  // snapshots (server + network). Both ~30 = healthy. Hidden when disconnected
+  // (the banner covers that) and between rounds.
+  if (latestSnap && !disconnected) {
+    const stps = latestSnap.tps;
+    const rhz = net.recvHz;
+    netStatEl.style.display = "block";
+    netStatEl.textContent = `Server ${stps.toFixed(0)} TPS · Net ${rhz.toFixed(0)}/s`;
+    const health = Math.min(stps, rhz);
+    netStatEl.className = health >= 25 ? "good" : health >= 15 ? "warn" : "bad";
+  } else {
+    netStatEl.style.display = "none";
+  }
+
   if (state) {
+    // Run client-side prediction on our own cells before anything reads them.
+    // We use lastView (previous frame's camera) to read the mouse — sub-pixel
+    // staleness, but breaks the chicken-and-egg of view depending on predicted
+    // positions and predicted positions depending on mouse-in-world.
+    // When disconnected, skip prediction so the cell freezes at its last known
+    // position (the interpolation buffer holds the last snapshot).
+    if (!disconnected && net.myId && mouse && lastView) {
+      const mouseTarget = mouseToWorld(lastView);
+      predictMyCells(state.cells, net.myId, mouseTarget, now);
+      for (let i = 0; i < state.cells.length; i++) {
+        const c = state.cells[i];
+        if (c.ownerId !== net.myId) continue;
+        const p = predictedSelf.get(c.id);
+        if (p) state.cells[i] = { ...c, x: p.x, y: p.y };
+      }
+    } else if (disconnected) {
+      // reset the dt baseline so the first frame after reconnect doesn't see
+      // a huge dt and fling the cell across the map.
+      lastPredictTime = 0;
+    }
+
     const myCells = net.myId
       ? state.cells.filter((c) => c.ownerId === net!.myId)
       : [];
@@ -318,6 +387,73 @@ function mouseToWorld(view: {
   };
 }
 
+// Mirror of the server's moveCell target-seek math, run locally on our own cells
+// so they react to the mouse instantly. Each frame we (1) reconcile the predicted
+// position toward the latest server state (snap on large divergence, soft-lerp
+// otherwise), then (2) advance toward `target` at speedOf(mass) just like the server.
+// Buffs (speed, rage) are mirrored using fields already in the cell snapshot.
+function predictMyCells(
+  cells: CellSnapshot[],
+  myId: string,
+  target: { x: number; y: number },
+  now: number,
+): void {
+  // dt clamped to 100ms so a paused-tab catch-up frame can't fling cells across the map
+  const dt = lastPredictTime ? Math.min(0.1, (now - lastPredictTime) / 1000) : 0;
+  lastPredictTime = now;
+
+  const seenIds = new Set<string>();
+  for (const c of cells) {
+    if (c.ownerId !== myId) continue;
+    seenIds.add(c.id);
+
+    let p = predictedSelf.get(c.id);
+    if (!p) {
+      // first time seeing this cell (initial join, split, respawn) — seed from server
+      p = { x: c.x, y: c.y };
+      predictedSelf.set(c.id, p);
+    } else {
+      const dx = p.x - c.x;
+      const dy = p.y - c.y;
+      if (dx * dx + dy * dy > PREDICT_SNAP_DIST_SQ) {
+        // huge divergence — snap. usually means a split/pop happened and we'd be
+        // guessing wildly wrong. trust the server.
+        p.x = c.x;
+        p.y = c.y;
+      } else {
+        // gentle pull toward server position to prevent slow drift from math mismatch
+        p.x += (c.x - p.x) * PREDICT_DRIFT_LERP;
+        p.y += (c.y - p.y) * PREDICT_DRIFT_LERP;
+      }
+    }
+
+    // advance toward the mouse target using the same speed math the server runs
+    if (dt > 0) {
+      const dx = target.x - p.x;
+      const dy = target.y - p.y;
+      const dist = Math.hypot(dx, dy);
+      if (dist > 1) {
+        let mult = 1;
+        if (c.speedBuffRemainingMs && c.speedBuffRemainingMs > 0)
+          mult *= CONFIG.speedCell.speedMultiplier;
+        if (c.raged) mult *= CONFIG.explosive.rageSpeedMultiplier;
+        const speed = speedOf(c.mass) * mult;
+        const step = Math.min(speed * dt, dist);
+        p.x += (dx / dist) * step;
+        p.y += (dy / dist) * step;
+      }
+      const r = radiusOf(c.mass);
+      p.x = Math.max(r, Math.min(CONFIG.world.width - r, p.x));
+      p.y = Math.max(r, Math.min(CONFIG.world.height - r, p.y));
+    }
+  }
+
+  // garbage-collect predicted entries for cells we no longer have (eaten/merged/died)
+  for (const id of predictedSelf.keys()) {
+    if (!seenIds.has(id)) predictedSelf.delete(id);
+  }
+}
+
 function interpolate(snapshots: Snapshot[], target: number): Snapshot | null {
   if (snapshots.length === 0) return null;
   let s0 = snapshots[0];
@@ -349,6 +485,7 @@ function interpolate(snapshots: Snapshot[], target: number): Snapshot | null {
   return {
     serverTime: s1.serverTime,
     receivedAt: s1.receivedAt,
+    tps: s1.tps,
     cells: lerpedCells,
     food: s1.food,
     blobs: s1.blobs,

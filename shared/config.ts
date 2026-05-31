@@ -2,8 +2,11 @@
 // Interval/Cooldown/Duration values are in milliseconds. Velocity/speed are px/sec.
 export const CONFIG = {
   port: 8080,
-  // TPS
-  tickRate: 60,
+  // TPS — reverted from 60 back to 30 to halve snapshot allocations after we
+  // saw repeated server OOMs at 60 Hz on Fly. The 50ms client interpolation
+  // buffer and 50ms ping to the Singapore region still keep perceived input
+  // lag well below the original v0.5.x feel.
+  tickRate: 30,
 
   world: {
     width: 5000,
@@ -12,7 +15,10 @@ export const CONFIG = {
   },
 
   player: {
-    startMass: 1000,
+    // v0.6.8: start at the mass floor (was 1000). Smaller start = higher zoom =
+    // much smaller per-viewer AOI/snapshot (helps scalability), plus a real
+    // from-scratch growth curve.
+    startMass: 10,
     // hard floor for any cell's mass — independent of startMass. cells shrink
     // toward this via decay, eject, rage, etc. but never below it.
     minMass: 10,
@@ -39,6 +45,10 @@ export const CONFIG = {
 
   virus: {
     count: 30,
+    // world-wide cap on live viruses. feedViruses only adds (never removes), so
+    // without this they accumulate over a session and grow tick + snapshot cost.
+    // (v0.6.8)
+    maxCount: 60,
     mass: 100,
     popThreshold: 133,
     friction: 0.92,
@@ -47,7 +57,7 @@ export const CONFIG = {
   },
 
   mother: {
-    count: 5,
+    count: 3,
     mass: 300,
     // cells with mass >= popThreshold × (effectiveMass / mass) pop on the mother
     // (virus-style), obtaining its FULL effective mass (300 + consumedMass). this
@@ -78,10 +88,15 @@ export const CONFIG = {
     // food converted from consumedMass (player cells the mother ate) IGNORES this cap
     // and is minted until consumedMass hits 0. No mother food is ever expired/removed
     // except by being eaten — so heavy player-grinding can grow the field's food.
-    maxSpawnedFood: 200,
+    maxSpawnedFood: 150,
+    // world-wide cap on live BONUS food (the uncapped consumedMass-driven pellets).
+    // when total bonus food across all mothers reaches this, new bonus pellets are
+    // skipped — consumedMass still drains so the mother shrinks back. prevents the
+    // tick loop from slowing down as bonus food accumulates over a long session.
+    maxTotalBonusFood: 1000,
     // base launch speed (px/sec), scaled up with the mother's radius so food still
     // clears the body when the mother is engorged. Friction then settles it nearby.
-    foodInitialVelocity: 750,
+    foodInitialVelocity: 500,
     // each shot of food gets a random friction in [min, max]: lower = settles
     // closer, higher = drifts farther. Randomizing gives a more organic spread.
     foodFrictionMin: 0.85,
@@ -134,7 +149,10 @@ export const CONFIG = {
   },
 
   food: {
-    count: 5000,
+    // v0.6.8: 4000 -> 1500. Whole-map snapshots serialize ~food.count
+    // objects per viewer per tick, so this is the biggest single lever on
+    // snapshot build + JSON cost + the per-tick food grid rebuild.
+    count: 1500,
     mass: 1,
     radius: 5,
   },

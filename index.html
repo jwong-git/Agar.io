@@ -92,6 +92,19 @@
         font-family: ui-monospace, monospace; font-size: 11px;
       }
 
+      #netstat {
+        position: fixed; bottom: 16px; right: 16px;
+        font-size: 12px; font-family: ui-monospace, monospace;
+        padding: 4px 8px; border-radius: 6px; display: none;
+        background: var(--leaderboard-bg);
+        text-shadow: 0 1px 2px var(--hud-shadow);
+        pointer-events: none; z-index: 5;
+        font-variant-numeric: tabular-nums;
+      }
+      #netstat.good { color: #43d17a; }
+      #netstat.warn { color: #ffd24a; }
+      #netstat.bad  { color: #ff5a5a; }
+
       #leaderboard {
         position: fixed; top: 16px; right: 16px;
         font-size: 13px; min-width: 200px;
@@ -215,6 +228,18 @@
         font-size: 12px; opacity: 0.5; pointer-events: none;
         font-family: ui-monospace, monospace;
       }
+      /* Shown when the client hasn't received a server snapshot in >2s.
+         Tells the player the freeze is a server issue, not their game. */
+      #disconnectBanner {
+        position: fixed; top: 60px; left: 50%; transform: translateX(-50%);
+        background: rgba(180, 30, 30, 0.92); color: #fff;
+        padding: 10px 20px; border-radius: 8px;
+        font-size: 14px; font-weight: 600;
+        box-shadow: 0 4px 16px rgba(0,0,0,0.35);
+        display: none; z-index: 9;
+        pointer-events: none; letter-spacing: 0.5px;
+      }
+      #disconnectBanner.show { display: block; }
     </style>
   </head>
   <body>
@@ -225,6 +250,8 @@
     </div>
     <div id="leaderboard"></div>
     <div id="buffs"></div>
+    <div id="netstat"></div>
+    <div id="disconnectBanner">⚠ Lost connection to server — reconnecting…</div>
     <div id="controls">
       <kbd>Mouse</kbd> move &nbsp; <kbd>Space</kbd> split &nbsp; <kbd>W</kbd> eject mass
     </div>
@@ -287,7 +314,7 @@
           </div>
         </div>
       </div>
-      <div id="version">v0.6.2</div>
+      <div id="version">v0.6.8</div>
     </div>
 
     <script type="module" src="/src/main.ts"></script>

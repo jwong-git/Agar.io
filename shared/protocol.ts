@@ -80,6 +80,9 @@ export type ServerMessage =
   | {
       type: "state";
       t: number;
+      // effective server tick rate (EMA of the real inter-tick interval). Drops
+      // below tickRate when the process is CPU-throttled/descheduled. Shown in HUD.
+      tps: number;
       cells: CellSnapshot[];
       food: FoodSnapshot[];
       blobs: BlobSnapshot[];

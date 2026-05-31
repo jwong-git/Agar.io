@@ -6,6 +6,142 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ---
 
+## v0.6.8 — 2026-05-31 (Server load reduction)
+
+Goal: cut per-tick CPU + allocation so TPS stops collapsing after ~1 min. The
+slow-mo is global (one Node process, one 30 Hz tick, shared state): when a tick
+exceeds 33 ms, `setInterval` just runs late, so effective TPS = 1000/tick_ms and
+*every* client — including fresh joiners — drops into slow-mo together.
+
+### Fixed
+- **Food over-serialization** (`server/index.ts` `sendSnapshots`). Was pushing the
+  live `ServerFood` into the snapshot, so `JSON.stringify` emitted `vx/vy/friction/
+  transient` **and the whole `source` Mother object** for every pellet — 3-4× bloat
+  on the largest array, per viewer, 30×/s. Now pushes a minimal `{x, y, color}`.
+
+### Changed
+- **`food.count` 4000 → 1500** (`shared/config.ts`). Snapshots are effectively
+  whole-map (see AOI note), so snapshot build + JSON cost + the per-tick food grid
+  rebuild all scale with this. Biggest single lever.
+- **`aoiHalfExtent` trimmed 1200/800 → 1100/700** (`shared/math.ts`). The render
+  buffer is capped at 1920×1080, so the old constants over-estimated the visible
+  area; ~20% smaller AOI with no visible pop-in.
+- **`player.startMass` 1000 → 10** (`shared/config.ts`). Players now start at the
+  mass floor (`minMass`) and grow from scratch. Beyond the gameplay change, this is
+  the bigger AOI lever: a small cell zooms in (higher zoom), so its per-viewer AOI —
+  and thus snapshot size — shrinks from ~whole-map to a local neighborhood, which
+  also improves scalability as entity/agent counts grow.
+
+### Added
+- **`CONFIG.virus.maxCount = 60`** + cap check in `feedViruses`. Viruses were only
+  ever added (never removed), so they accumulated over a session and grew tick +
+  snapshot cost. At the cap, a fed virus no longer shoots a new one.
+- **Effective-TPS metric + in-game HUD readout.** The server now tracks an EMA of
+  the *real wall-clock interval between tick starts* (not just tick compute time),
+  which is the only thing that reveals CPU throttling/steal — a descheduled process
+  still computes a tick in <1 ms but fires it late, so duration looks fine while TPS
+  collapses. This `tps` is sent in every `state` snapshot and logged in the `[tick]`
+  line. The client renders a bottom-right `#netstat` readout `Server N TPS · Net N/s`,
+  color-coded (green ≥25 / amber ≥15 / red <15). `Net` is the client-measured
+  snapshot receive rate. Reading them together localizes lag: low Server = CPU
+  throttle; Server fine + low Net = network. Wired through `protocol.ts` (`state.tps`)
+  → `server/index.ts` → `network.ts` (`Snapshot.tps`, `Network.recvHz`) → `main.ts`
+  → `index.html`. Version label bumped to v0.6.8.
+
+### Outcome
+- **Resolved.** Deployed to Fly (`shared-cpu-1x`, region `sin`) and confirmed over
+  multiple play sessions via the new HUD + `[tick]` logs: Server TPS holds ~30 with
+  no slow-mo and entity counts stay flat. No CPU bump needed — stayed on
+  `shared-cpu-1x`.
+- Scaled the app to **a single machine** (`fly scale count 1`). Game state is
+  in-memory per machine, so multiple machines would mean multiple disconnected
+  worlds; one machine keeps a single shared world.
+
+### Validating in future
+- Watch the in-game `Server N TPS · Net N/s` readout, or `fly logs` `[tick]` lines.
+  Green / ~30 = healthy. If Server TPS drops with flat entity counts under load it's
+  the CPU floor — cheapest next step is `fly scale vm shared-cpu-2x --memory 1024`
+  (~2× price; not the ~5× of `performance-1x`).
+
+---
+
+## v0.6.7 — 2026-05-25 (Tick instrumentation)
+
+### Added
+- **Per-tick duration logging** (`server/index.ts`). Every 90 ticks (~3s at 30 Hz) the server logs a line to stdout (visible via `fly logs`) with:
+  - average and max tick duration in ms over the window,
+  - `players`, `cells`, `food`, `bonusFood`, `viruses`, `blobs`, `mothers` counts.
+
+### Why
+- After v0.6.6's bonus-food cap, TPS still degraded after ~6 minutes of play. Need actual numbers to distinguish CPU contention (tick climbs while counts stay flat) from state-growth (counts climb in lockstep with tick). This is read-only diagnostic output — no behavior change.
+
+### How to read it
+- Healthy 30Hz: `avg ~33ms or less`, counts roughly stable.
+- CPU-starved: `avg` climbs, `max` spikes, entity counts essentially unchanged.
+- State-growth: `avg` climbs alongside one of the entity counts (most likely `viruses` — see `feedViruses` adds new viruses without removing originals).
+
+---
+
+## v0.6.6 — 2026-05-25 (Cap unbounded bonus food)
+
+### Added
+- **`CONFIG.mother.maxTotalBonusFood = 1000`** — world-wide cap on live BONUS mother food (the uncapped, consumedMass-driven pellets). When total bonus food across all mothers reaches this, new bonus pellets are **skipped** (consumedMass still drains, so engorged mothers still shrink back to base size). Natural mother food (the base `foodPerSpawn` pellets) is still per-mother capped by `maxSpawnedFood` and unchanged.
+
+### Changed
+- **`server/index.ts`** now maintains a `bonusFoodCount` counter, incremented in `mintMotherFood` (when `counted=false`) and decremented in `sweepEatenFood` (when a transient pellet with no `source` is removed — that's the unique signature of bonus food). `motherSpawnFood`'s bonus loop checks the world cap before each push.
+
+### Why
+- Symptom: server tick started at ~normal then dropped to ~4 TPS over a few minutes ("slow-motion gameplay"). Diagnostic profile of unbounded data growth. Bonus food never expired by design ("food won't be removed"), so over a session the food array grew, the food spatial grid rebuild grew, the per-viewer snapshot JSON grew, and tick CPU climbed past the 33ms budget — especially painful on Fly's `shared-cpu-1x` (1/16 core).
+- This cap stops the unbounded growth without changing gameplay meaningfully: a player feeding a mother still gets a long stream of bonus food, just not literally infinite. The mother's effective mass still drains to 0 over time.
+
+### Notes
+- Even with this cap, `shared-cpu-1x` is a thin slice (1/16 of a CPU core) for a 30Hz real-time server. If TPS still degrades under heavy play after this fix, bumping VM class to `shared-cpu-2x` or `performance-1x` is the next move (`fly scale vm <kind> --memory 1024`).
+
+---
+
+## v0.6.5 — 2026-05-25 (Server stability take 2: more RAM, fewer allocs)
+
+### Changed
+- **VM memory 512 → 1024 MB** (`fly.toml`). After v0.6.4 disabled `permessage-deflate`, OOMs moved from V8 heap to **process-out-of-memory on `ArrayBuffer::NewBackingStore`** — native memory (Buffers, socket send queues) was getting starved at 512 MB. 1024 MB gives both the JS heap and native allocations comfortable room.
+- **Removed `NODE_OPTIONS=--max-old-space-size=400`** from the `Dockerfile`. That explicit cap was the right call on a 512 MB VM but counterproductive on 1024 MB — Node auto-sizes the heap sensibly on 1 GB+ and leaves native memory enough room. The explicit override at 400 MB was actively contributing to native-side OOM.
+- **Tick rate 60 → 30 Hz** (`shared/config.ts CONFIG.tickRate`, CLAUDE.md updated). Halves snapshot allocations and outgoing bandwidth per second. Adds ~16 ms back to the worst-case input → reaction time; the 50 ms interpolation buffer plus the Singapore region's low ping keep perceived lag well below the v0.5.x baseline.
+
+### Notes
+- Cost: ~$2–4 / month extra on Fly for the bigger VM. Cheap insurance against player-visible crashes.
+- If OOMs still appear under heavy play, the next layer to address is **option C** (cap unbounded mother bonus food, since uneaten food accumulates indefinitely per the "food won't be removed" design and inflates snapshot size over a long session).
+- The v0.6.4 disconnect banner stays — even with a stable server, the banner is a clear UX signal whenever connectivity does drop.
+
+### Changed
+- **`perMessageDeflate` disabled** (`server/index.ts`). The `ws` library docs warn that WebSocket compression can consume large amounts of memory under sustained high-volume traffic; on Fly with 60 Hz snapshots and 512 MB, Node was V8-heap-OOMing every 3–7 minutes (`FATAL ERROR: Reached heap limit`). Disabling compression has stopped the leak in testing. Snapshots are larger on the wire but bandwidth was not the constraint.
+- **Explicit V8 heap limit in `Dockerfile`**: `ENV NODE_OPTIONS="--max-old-space-size=400"`. Without this, Node auto-derives a smaller heap from VM memory (~280 MB on a 512 MB container), throwing heap-limit errors before the OS would OOM-kill. Pinning it to 400 MB uses most of the available RAM as heap and prevents the artificial undersize.
+
+### Added
+- **Disconnect detection in the client** (`src/main.ts`, `index.html`). If no server snapshot has arrived in **2 seconds**, the client:
+  - shows a red **"Lost connection to server — reconnecting…"** banner near the top of the screen, and
+  - **pauses MVP prediction** so the local cell freezes at its last known position instead of drifting off (which used to look like the cell was "moving but doing nothing" — confusing because the server was actually dead).
+  This makes server failures legible to players instead of looking like the client itself broke.
+
+### Notes
+- v0.6.3's client-side prediction was not the cause of the apparent regressions earlier; the underlying server OOMs were repeatedly killing the WebSocket, and the local prediction kept moving the player's cell after disconnect, masquerading as "prediction bug". With (A) the compression off, (B) the heap fixed, and (D) the disconnect indicator in place, the failure mode is both *less likely* and *visible when it happens*.
+
+---
+
+## v0.6.3 — 2026-05-22 (Client-side prediction MVP)
+
+### Added
+- **Client-side prediction of your own cells (movement-only).** The render path now keeps a `predictedSelf` map per cell and advances each cell toward the current mouse target using the same `speedOf(mass)` math the server runs. Each frame: reconcile predicted vs server interpolated state (snap if diverged > 150px, otherwise gentle lerp factor 0.05 to bleed off drift), then advance by `dt`. Buffs (speed, rage) mirrored using the existing `CellSnapshot.speedBuffRemainingMs` / `raged` fields. World-bound clamping mirrors the server.
+
+### Notes
+- Removes ~RTT + interpolation buffer of perceived input lag from **your** cell — movement should feel instant. Other players' cells, eating, splits, decay, virus/mother pops, and sibling repulsion remain server-authoritative (~RTT old, as before — that's the cost of cheat-proof authority).
+- Movement-only by design: we don't predict eating, splits, ejects, pops, or repulsion. On any discontinuous event the predicted position will diverge from server; the snap-on-large-divergence rule handles it (splits trigger a snap because new cell IDs appear seeded from server, and old cell positions snap when their launch travel exceeds 150px).
+- Touched files: `src/main.ts` only (~80 LOC). No server changes, no protocol changes.
+
+### Tuning knobs
+- `PREDICT_SNAP_DIST_SQ` in `src/main.ts` (default 150² px²): bigger ⇒ more tolerance before snapping. Lower if you see warps on near-edge play; raise if you see snap-back jitter during normal motion.
+- `PREDICT_DRIFT_LERP` (default 0.05): bigger ⇒ stronger pull toward server each frame. Raise if cells drift forward of server too aggressively; lower if movement feels dragged-back.
+
+---
+
 ## v0.6.2 — 2026-05-22 (Latency quick-wins)
 
 ### Changed

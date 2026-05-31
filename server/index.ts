@@ -157,6 +157,13 @@ function randomFoodFriction(): number {
   return foodFrictionMin + Math.random() * (foodFrictionMax - foodFrictionMin);
 }
 
+// World-wide live count of BONUS food (transient food with no source mother).
+// Maintained by mintMotherFood (increment) and sweepEatenFood (decrement).
+// motherSpawnFood checks this before spawning bonus pellets to cap memory + tick
+// cost — without a cap, bonus food accumulated over a session caused TPS to drop
+// (snapshot serialization + food grid rebuild scale with food count).
+let bonusFoodCount = 0;
+
 function spawnFood(): ServerFood {
   return {
     x: Math.random() * CONFIG.world.width,
@@ -323,11 +330,11 @@ const httpServer = createServer((req, res) => {
   });
 });
 
-// permessage-deflate compresses each WebSocket frame on the wire. Snapshots are
-// JSON-heavy with lots of repeated keys/colors — typical compression ratios are
-// 3–5x, which on a slow uplink translates to lower latency (less to push down
-// the pipe). Modest CPU cost; well worth it for this game.
-const wss = new WebSocketServer({ noServer: true, perMessageDeflate: true });
+// permessage-deflate is intentionally OFF. The `ws` library docs warn that it
+// can consume large amounts of memory under sustained high-volume traffic
+// (we observed V8 heap OOMs every 3–7 min on Fly with 60Hz snapshots + 512MB).
+// Snapshots are bigger on the wire without it, but that's a fine trade for stability.
+const wss = new WebSocketServer({ noServer: true });
 httpServer.on("upgrade", (req, socket, head) => {
   const pathname = new URL(req.url ?? "/", "http://localhost").pathname;
   if (pathname === "/ws") {
@@ -410,8 +417,32 @@ const dt = 1 / CONFIG.tickRate;
 const tickIntervalMs = 1000 / CONFIG.tickRate;
 setInterval(tick, tickIntervalMs);
 
+// Per-tick instrumentation: accumulate wall-clock duration and dump a summary
+// every TICK_LOG_INTERVAL ticks (≈3s at 30Hz). Tells us at a glance whether
+// slow-mo is from state growth (entity counts climb) or CPU contention (tick
+// duration climbs while counts stay flat).
+let tickAccumMs = 0;
+let tickAccumCount = 0;
+let tickMaxMs = 0;
+const TICK_LOG_INTERVAL = 90;
+
+// Effective TPS: EMA of the REAL wall-clock interval between tick starts. Unlike
+// tick *duration* (compute time, which stays tiny), this rises when the OS
+// deschedules/throttles the process — the actual failure mode on Fly's shared
+// CPU. Sent to clients for the HUD and added to the [tick] log line. (v0.6.8)
+let lastTickAt = 0;
+let tickIntervalEma = tickIntervalMs;
+
 function tick(): void {
+  const tickStart = performance.now();
   const now = Date.now();
+
+  if (lastTickAt > 0) {
+    // EMA over ~10 ticks; rises when ticks fire late (CPU throttle/steal).
+    tickIntervalEma = tickIntervalEma * 0.9 + (now - lastTickAt) * 0.1;
+  }
+  lastTickAt = now;
+  const effectiveTps = 1000 / tickIntervalEma;
 
   for (const p of players.values()) {
     if (p.splitWanted) {
@@ -562,7 +593,23 @@ function tick(): void {
   leaderboard.sort((a, b) => b.mass - a.mass);
   leaderboard.length = Math.min(leaderboard.length, 10);
 
-  sendSnapshots(now, leaderboard);
+  sendSnapshots(now, leaderboard, effectiveTps);
+
+  const tickMs = performance.now() - tickStart;
+  tickAccumMs += tickMs;
+  tickAccumCount++;
+  if (tickMs > tickMaxMs) tickMaxMs = tickMs;
+  if (tickAccumCount >= TICK_LOG_INTERVAL) {
+    const avg = tickAccumMs / tickAccumCount;
+    console.log(
+      `[tick] tps=${effectiveTps.toFixed(1)} avg=${avg.toFixed(1)}ms max=${tickMaxMs.toFixed(1)}ms over ${tickAccumCount} ticks ` +
+        `| players=${players.size} cells=${cells.length} food=${food.length} bonusFood=${bonusFoodCount} ` +
+        `viruses=${viruses.length} blobs=${blobs.length} mothers=${mothers.length}`,
+    );
+    tickAccumMs = 0;
+    tickAccumCount = 0;
+    tickMaxMs = 0;
+  }
 }
 
 function moveCell(c: Cell, now: number): void {
@@ -682,8 +729,13 @@ function sweepEatenFood(): void {
   for (let i = food.length - 1; i >= 0; i--) {
     const f = food[i];
     if (f.x < 0) {
-      // free the minting mother's cap (only natural food carries a source).
-      if (f.source) f.source.spawnedFood = Math.max(0, f.source.spawnedFood - 1);
+      if (f.source) {
+        // natural mother food: free its mother's per-mother cap.
+        f.source.spawnedFood = Math.max(0, f.source.spawnedFood - 1);
+      } else if (f.transient) {
+        // bonus mother food (transient + no source): decrement world-wide cap.
+        bonusFoodCount = Math.max(0, bonusFoodCount - 1);
+      }
       food.splice(i, 1);
     }
   }
@@ -703,14 +755,20 @@ function feedViruses(): void {
         b.x = -1;
         if (v.fedCount >= CONFIG.virus.feedThreshold) {
           v.fedCount = 0;
-          viruses.push({
-            x: v.x,
-            y: v.y,
-            vx: Math.cos(v.lastFedAngle) * CONFIG.virus.shootVelocity,
-            vy: Math.sin(v.lastFedAngle) * CONFIG.virus.shootVelocity,
-            fedCount: 0,
-            lastFedAngle: 0,
-          });
+          // World-wide cap on virus count. feedViruses only ever ADDS viruses
+          // (originals are never removed), so without a cap they accumulate over
+          // a session and the tick + snapshot cost climbs. At the cap the fed
+          // virus simply doesn't shoot a new one. (v0.6.8)
+          if (viruses.length < CONFIG.virus.maxCount) {
+            viruses.push({
+              x: v.x,
+              y: v.y,
+              vx: Math.cos(v.lastFedAngle) * CONFIG.virus.shootVelocity,
+              vy: Math.sin(v.lastFedAngle) * CONFIG.virus.shootVelocity,
+              fedCount: 0,
+              lastFedAngle: 0,
+            });
+          }
         }
       }
     });
@@ -734,6 +792,7 @@ function mintMotherFood(m: Mother, speed: number, counted: boolean): void {
     transient: true,
     source: counted ? m : null,
   });
+  if (!counted) bonusFoodCount++;
 }
 
 function motherSpawnFood(m: Mother): void {
@@ -750,16 +809,20 @@ function motherSpawnFood(m: Mother): void {
     m.spawnedFood++;
   }
 
-  // BONUS food: mass converted back from player cells the mother ate. This IGNORES
-  // the cap and is minted every spawn until consumedMass drains to 0 — so a mother
-  // that grinds up players keeps pumping out food regardless of the cap. These
-  // pellets are uncounted (source=null) so they never block natural food, and (like
-  // all mother food) are only removed when eaten — never expired.
+  // BONUS food: mass converted back from player cells the mother ate. Per-mother
+  // unbounded — bypasses the per-mother natural cap. BUT world-wide capped by
+  // CONFIG.mother.maxTotalBonusFood to prevent the tick loop from slowing down as
+  // bonus food accumulates over a long session (snapshot serialization + food grid
+  // rebuild scale with food count). When the world cap is hit, consumedMass still
+  // drains so the mother shrinks back; new bonus pellets are just skipped.
   let bonus = Math.floor(m.consumedMass * CONFIG.mother.foodPerConsumedMass);
   if (bonus < 1 && m.consumedMass > 0) bonus = 1; // always drain down to empty
   if (bonus > 0) {
     m.consumedMass = Math.max(0, m.consumedMass - bonus * CONFIG.mother.foodMassCost);
-    for (let i = 0; i < bonus; i++) mintMotherFood(m, speed, false);
+    for (let i = 0; i < bonus; i++) {
+      if (bonusFoodCount >= CONFIG.mother.maxTotalBonusFood) break;
+      mintMotherFood(m, speed, false);
+    }
   }
 }
 
@@ -1228,6 +1291,7 @@ function viewerAOI(
 function sendSnapshots(
   now: number,
   leaderboard: LeaderboardEntry[],
+  tps: number,
 ): void {
   for (const viewer of players.values()) {
     const aoi = viewerAOI(viewer.id);
@@ -1265,7 +1329,11 @@ function sendSnapshots(
     foodGrid.forEachInRange(aoi.x0, aoi.y0, aoi.x1, aoi.y1, (f) => {
       if (f.x < 0) return; // swept this tick; grid still holds a stale reference
       if (f.x < aoi.x0 || f.x > aoi.x1 || f.y < aoi.y0 || f.y > aoi.y1) return;
-      vFood.push(f);
+      // Push a minimal FoodSnapshot, NOT the live ServerFood. JSON.stringify
+      // serializes runtime properties, so pushing `f` leaked vx/vy/friction/
+      // transient AND the whole `source` Mother object into every pellet — 3-4×
+      // wire+CPU bloat on the single largest snapshot array. (v0.6.8)
+      vFood.push({ x: f.x, y: f.y, color: f.color });
     });
     const vBlobs: BlobSnapshot[] = [];
     for (const b of blobs) {
@@ -1308,6 +1376,7 @@ function sendSnapshots(
     send(viewer.socket, {
       type: "state",
       t: now,
+      tps,
       cells: vCells,
       food: vFood,
       blobs: vBlobs,

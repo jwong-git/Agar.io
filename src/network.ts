@@ -16,6 +16,7 @@ import type {
 export interface Snapshot {
   serverTime: number;
   receivedAt: number;
+  tps: number;
   cells: CellSnapshot[];
   food: FoodSnapshot[];
   blobs: BlobSnapshot[];
@@ -34,6 +35,11 @@ export class Network {
   worldWidth = 5000;
   worldHeight = 5000;
   snapshots: Snapshot[] = [];
+  // client-measured snapshot arrival rate (Hz), EMA. Reflects what THIS client
+  // actually receives (server TPS + network delivery), vs the server-reported tps.
+  recvHz = 0;
+  private lastStateAt = 0;
+  private recvIntervalEma = 0;
   onDead: (killedBy: string | null) => void = () => {};
   onDisconnect: () => void = () => {};
 
@@ -72,9 +78,20 @@ export class Network {
       this.worldWidth = msg.world.width;
       this.worldHeight = msg.world.height;
     } else if (msg.type === "state") {
+      const receivedAt = performance.now();
+      if (this.lastStateAt > 0) {
+        const interval = receivedAt - this.lastStateAt;
+        this.recvIntervalEma =
+          this.recvIntervalEma === 0
+            ? interval
+            : this.recvIntervalEma * 0.8 + interval * 0.2;
+        this.recvHz = 1000 / this.recvIntervalEma;
+      }
+      this.lastStateAt = receivedAt;
       this.snapshots.push({
         serverTime: msg.t,
-        receivedAt: performance.now(),
+        receivedAt,
+        tps: msg.tps,
         cells: msg.cells,
         food: msg.food,
         blobs: msg.blobs,
